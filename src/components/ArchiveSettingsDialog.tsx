@@ -1,6 +1,6 @@
 import { FolderOpen, X } from "lucide-react";
 import { Dialog } from "../Dialog";
-import type { AppSettings, RenameTemplate, SubdirMode } from "../types";
+import type { AppSettings, ReceiptPreference, RenameTemplate, SubdirMode } from "../types";
 import {
   buildFilenamePreview,
   PLACEHOLDER_TOKENS,
@@ -194,6 +194,23 @@ export function ArchiveSettingsDialog({
             多份文书时自动加两位序号前缀（01_、02_）
           </label>
         )}
+
+        <div>
+          <label className="input-label" htmlFor="receipt-preference">全国统一送达的签收回执</label>
+          <select
+            id="receipt-preference"
+            value={draft.receiptPreference}
+            disabled={busy}
+            onChange={(event) => onChangeDraft({
+              ...draft, receiptPreference: event.currentTarget.value as ReceiptPreference,
+            })}
+          >
+            <option value="ask">下载前询问（默认）</option>
+            <option value="download_only">仅下载</option>
+            <option value="submit">自动提交回执后下载</option>
+          </select>
+          <p className="hint-text">提交回执会向法院确认签收。</p>
+        </div>
 
         {archiveError && (
           <div className="error-inline" role="alert">

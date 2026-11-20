@@ -304,11 +304,11 @@ export function QueueItemCard({
 
       {item.receiptStatus !== "not_requested" && (
         <p className="hint-text" style={{ margin: "6px 0 0" }}>
-          旧版签收记录 ·{" "}
+          签收回执 ·{" "}
           {
             ({
-              confirmed: "已确认",
-              unconfirmed: "未确认",
+              confirmed: "法院已确认",
+              unconfirmed: "法院未确认，可在法院页面查看",
               unknown: "待到法院页面核实",
             })[item.receiptStatus]
           }

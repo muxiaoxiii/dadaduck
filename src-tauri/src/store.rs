@@ -1,4 +1,6 @@
-use crate::models::{AppSettings, ItemStatus, LawyerProfile, LegacyDocumentEntry, QueueItem};
+use crate::models::{
+    AppSettings, ItemStatus, LawyerProfile, LegacyDocumentEntry, Platform, QueueItem, ReceiptStatus,
+};
 use crate::parser::{extract_case_number, extract_court_name};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
@@ -22,25 +24,106 @@ pub fn staging_dir_path(config_dir: &Path) -> PathBuf {
 }
 
 pub fn load_queue_history(config_dir: &Path) -> Vec<QueueItem> {
-    read_archive_records(config_dir)
-        .ok()
-        .flatten()
+    read_queue_history(config_dir)
         .unwrap_or_default()
+        .into_iter()
+        .filter(|item| !item.documents.is_empty())
+        .map(|mut item| {
+            redact_history_item(&mut item);
+            item
+        })
+        .collect()
 }
 
-fn read_archive_records(config_dir: &Path) -> Result<Option<Vec<QueueItem>>, String> {
+fn read_queue_history(config_dir: &Path) -> Result<Vec<QueueItem>, String> {
     let raw = match std::fs::read_to_string(history_path(config_dir)) {
         Ok(raw) => raw,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(err) => return Err(err.to_string()),
     };
-    let mut items = serde_json::from_str::<Vec<QueueItem>>(&raw)
-        .map_err(|err| format!("无法读取旧版队列记录：{err}"))?;
-    items.retain(|item| !item.documents.is_empty());
-    for item in &mut items {
-        redact_history_item(item);
+    serde_json::from_str(&raw).map_err(|err| format!("无法读取旧版队列记录：{err}"))
+}
+
+fn receipt_attempt_dir(config_dir: &Path) -> PathBuf {
+    config_dir.join("receipt_attempts")
+}
+
+fn receipt_attempt_path(config_dir: &Path, key: &str) -> PathBuf {
+    receipt_attempt_dir(config_dir).join(format!("{:x}.json", Sha256::digest(key.as_bytes())))
+}
+
+fn receipt_attempt_key(item: &QueueItem) -> String {
+    match (&item.params.qdbh, &item.params.sdbh) {
+        (Some(channel), Some(delivery)) => format!("{}:{channel}{delivery}", channel.len()),
+        _ => item.fingerprint.clone(),
     }
-    Ok(Some(items))
+}
+
+pub fn read_receipt_attempt(
+    config_dir: &Path,
+    item: &QueueItem,
+) -> Result<Option<ReceiptStatus>, String> {
+    let key = receipt_attempt_key(item);
+    let status = read_receipt_status_at(receipt_attempt_path(config_dir, &key))?;
+    if status.is_some() || key == item.fingerprint {
+        return Ok(status);
+    }
+    read_receipt_status_at(receipt_attempt_path(config_dir, &item.fingerprint))
+}
+
+fn read_receipt_status_at(path: PathBuf) -> Result<Option<ReceiptStatus>, String> {
+    match std::fs::read(path) {
+        Ok(raw) => serde_json::from_slice(&raw)
+            .map(Some)
+            .map_err(|err| err.to_string()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+pub fn reserve_receipt_attempt(
+    config_dir: &Path,
+    item: &QueueItem,
+) -> Result<Option<ReceiptStatus>, String> {
+    let entry = write_receipt_temp(config_dir, ReceiptStatus::Unknown)?;
+    match entry.persist_noclobber(receipt_attempt_path(config_dir, &receipt_attempt_key(item))) {
+        Ok(_) => Ok(None),
+        Err(err) if err.error.kind() == std::io::ErrorKind::AlreadyExists => Ok(Some(
+            read_receipt_attempt(config_dir, item)?.unwrap_or(ReceiptStatus::Unknown),
+        )),
+        Err(err) => Err(err.error.to_string()),
+    }
+}
+
+pub fn finish_receipt_attempt(
+    config_dir: &Path,
+    item: &QueueItem,
+    status: ReceiptStatus,
+) -> Result<(), String> {
+    write_receipt_temp(config_dir, status)?
+        .persist(receipt_attempt_path(config_dir, &receipt_attempt_key(item)))
+        .map(|_| ())
+        .map_err(|err| err.error.to_string())
+}
+
+fn write_receipt_temp(
+    config_dir: &Path,
+    status: ReceiptStatus,
+) -> Result<tempfile::NamedTempFile, String> {
+    let dir = receipt_attempt_dir(config_dir);
+    std::fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
+    let mut entry = tempfile::NamedTempFile::new_in(&dir).map_err(|err| err.to_string())?;
+    serde_json::to_writer(entry.as_file_mut(), &status).map_err(|err| err.to_string())?;
+    entry.as_file().sync_all().map_err(|err| err.to_string())?;
+    Ok(entry)
+}
+
+pub fn clear_receipt_attempts(config_dir: &Path) -> Result<(), String> {
+    match std::fs::remove_dir_all(receipt_attempt_dir(config_dir)) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err.to_string()),
+    }
 }
 
 pub(crate) fn download_url_key(url: &str) -> String {
@@ -118,9 +201,7 @@ pub fn migrate_sensitive_storage(config_dir: &Path, settings: &AppSettings) -> R
     if settings_path(config_dir).exists() {
         save_settings(config_dir, settings)?;
     }
-    if let Some(records) = read_archive_records(config_dir)? {
-        save_queue_history(config_dir, &records)?;
-    }
+    migrate_queue_history(config_dir, config_dir)?;
 
     if let Some(legacy_dir) = config_dir
         .parent()
@@ -134,11 +215,26 @@ pub fn migrate_sensitive_storage(config_dir: &Path, settings: &AppSettings) -> R
                 .map_err(|err| format!("无法迁移旧版设置：{err}"))?;
             save_settings(&legacy_dir, &legacy)?;
         }
-        if let Some(records) = read_archive_records(&legacy_dir)? {
-            save_queue_history(&legacy_dir, &records)?;
-        }
+        migrate_queue_history(&legacy_dir, config_dir)?;
     }
     Ok(())
+}
+
+fn migrate_queue_history(history_dir: &Path, config_dir: &Path) -> Result<(), String> {
+    if !history_path(history_dir).exists() {
+        return Ok(());
+    }
+    let items = read_queue_history(history_dir)?;
+    for item in &items {
+        if item.platform == Platform::Zxfw
+            && item.receipt_status != ReceiptStatus::NotRequested
+            && read_receipt_attempt(config_dir, item)?.is_none()
+            && reserve_receipt_attempt(config_dir, item)?.is_none()
+        {
+            finish_receipt_attempt(config_dir, item, item.receipt_status)?;
+        }
+    }
+    save_queue_history(history_dir, &items)
 }
 
 pub fn load_exported_legacy_paths(config_dir: &Path) -> HashSet<String> {

@@ -89,6 +89,17 @@ fn start_queue(app: AppHandle, state: State<'_, QueueManager>) -> bool {
 }
 
 #[tauri::command]
+fn respond_to_receipt(
+    prompt_id: String,
+    submit: bool,
+    remember: bool,
+    app: AppHandle,
+    state: State<'_, QueueManager>,
+) -> Result<AppSettings, String> {
+    state.respond_to_receipt(&prompt_id, submit, remember, &TauriProgressSink::new(app))
+}
+
+#[tauri::command]
 fn pause_queue(app: AppHandle, state: State<'_, QueueManager>) {
     let sink = TauriProgressSink::new(app);
     state.pause_queue(&sink);
@@ -726,6 +737,7 @@ pub fn run() {
             get_queue_snapshot,
             parse_and_enqueue,
             start_queue,
+            respond_to_receipt,
             pause_queue,
             resume_queue,
             cancel_queue,

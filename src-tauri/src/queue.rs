@@ -3,7 +3,7 @@ use crate::hubei_client::{HubeiClient, HubeiError};
 use crate::models::{
     AppSettings, DocFailure, DocSaveStatus, DownloadedDoc, FileProgress, ItemStatus,
     LegacyExportInput, LegacyExportResult, ParseBatchSummary, Platform, QueueItem, QueueSnapshot,
-    TransferControl,
+    ReceiptPreference, ReceiptPrompt, ReceiptStatus, TransferControl,
 };
 use crate::parser::{normalize_case_number, parse_batch_input};
 use crate::renamer::{
@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
-use tokio::sync::watch;
+use tokio::sync::{oneshot, watch};
 use uuid::Uuid;
 
 pub trait ProgressSink: Send + Sync + Clone + 'static {
@@ -57,6 +57,12 @@ struct QueueState {
     active_workers: usize,
     claimed_ids: HashSet<String>,
     signal_tx: Option<watch::Sender<TransferControl>>,
+    pending_receipt: Option<PendingReceipt>,
+}
+
+struct PendingReceipt {
+    prompt: ReceiptPrompt,
+    response: oneshot::Sender<bool>,
 }
 
 struct WorkerSlotGuard<'a, S: ProgressSink> {
@@ -100,6 +106,7 @@ impl QueueManager {
                 active_workers: 0,
                 claimed_ids: HashSet::new(),
                 signal_tx: None,
+                pending_receipt: None,
             })),
             settings: Arc::new(Mutex::new(settings)),
             config_dir,
@@ -173,6 +180,13 @@ impl QueueManager {
             .collect();
         let mut summary = parse_batch_input(raw_input, &existing);
         for parsed in &mut summary.added {
+            if parsed.platform == Platform::Zxfw {
+                if let Ok(Some(status)) =
+                    crate::store::read_receipt_attempt(&self.config_dir, parsed)
+                {
+                    parsed.receipt_status = status;
+                }
+            }
             if let Some(archive) = guard
                 .items
                 .iter_mut()
@@ -185,7 +199,9 @@ impl QueueManager {
                     .or_else(|| parsed.case_number.clone());
                 parsed.documents.clone_from(&archive.documents);
                 parsed.failures.clone_from(&archive.failures);
-                parsed.receipt_status = archive.receipt_status.clone();
+                if parsed.receipt_status == ReceiptStatus::NotRequested {
+                    parsed.receipt_status = archive.receipt_status;
+                }
                 parsed.identity_attempts_used = archive.identity_attempts_used;
                 *archive = parsed.clone();
             } else {
@@ -266,16 +282,69 @@ impl QueueManager {
         if crate::store::exported_legacy_path(&self.config_dir).exists() {
             crate::store::save_exported_legacy_paths(&self.config_dir, &HashSet::new())?;
         }
+        let settings = {
+            let mut settings = lock_unpoisoned(&self.settings);
+            let mut cleared = settings.clone();
+            cleared.profiles.clear();
+            cleared.receipt_preference = ReceiptPreference::Ask;
+            crate::store::save_settings(&self.config_dir, &cleared)?;
+            *settings = cleared.clone();
+            cleared
+        };
+        crate::store::clear_receipt_attempts(&self.config_dir)?;
         state.items.clear();
         let snapshot = build_snapshot(&state);
         drop(state);
-        let settings = {
-            let mut settings = lock_unpoisoned(&self.settings);
-            settings.profiles.clear();
-            settings.clone()
-        };
         self.cleanup_stale_staging();
         sink.on_queue_updated(snapshot);
+        Ok(settings)
+    }
+
+    pub fn respond_to_receipt<S: ProgressSink>(
+        &self,
+        prompt_id: &str,
+        submit: bool,
+        remember: bool,
+        sink: &S,
+    ) -> Result<AppSettings, String> {
+        let mut state = lock_unpoisoned(&self.inner);
+        if state
+            .signal_tx
+            .as_ref()
+            .is_none_or(|tx| *tx.borrow() != TransferControl::Running)
+            || state
+                .pending_receipt
+                .as_ref()
+                .is_none_or(|pending| pending.prompt.id != prompt_id)
+        {
+            return Err("本次签收询问已结束。".into());
+        }
+
+        let settings = {
+            let mut settings = lock_unpoisoned(&self.settings);
+            if remember {
+                let mut updated = settings.clone();
+                updated.receipt_preference = if submit {
+                    ReceiptPreference::Submit
+                } else {
+                    ReceiptPreference::DownloadOnly
+                };
+                crate::store::save_settings(&self.config_dir, &updated)?;
+                *settings = updated;
+            }
+            settings.clone()
+        };
+        let pending = state
+            .pending_receipt
+            .take()
+            .expect("prompt checked under the state lock");
+        let snapshot = build_snapshot(&state);
+        drop(state);
+        sink.on_queue_updated(snapshot);
+        pending
+            .response
+            .send(submit)
+            .map_err(|_| "本次签收询问已结束。".to_string())?;
         Ok(settings)
     }
 
@@ -405,6 +474,7 @@ impl QueueManager {
             guard.is_running = false;
             guard.is_paused = false;
             guard.signal_tx = None;
+            guard.pending_receipt = None;
             if was_cancelled {
                 changed = finalize_paused_items_as_stopped(&mut guard.items);
             }
@@ -564,6 +634,129 @@ impl QueueManager {
         }
     }
 
+    async fn ask_about_receipt<S: ProgressSink>(
+        &self,
+        item: &QueueItem,
+        docs: &[ZxfwDocEntry],
+        rx: &mut watch::Receiver<TransferControl>,
+        sink: &S,
+    ) -> Result<bool, TransferControl> {
+        match self.get_settings().receipt_preference {
+            ReceiptPreference::DownloadOnly => return Ok(false),
+            ReceiptPreference::Submit => return Ok(true),
+            ReceiptPreference::Ask => {}
+        }
+        let (response, answer) = oneshot::channel();
+        let prompt = ReceiptPrompt {
+            id: Uuid::new_v4().to_string(),
+            case_number: item.case_number.clone(),
+            court_name: docs
+                .iter()
+                .filter_map(|doc| doc.c_fymc.as_ref())
+                .find(|name| !name.trim().is_empty())
+                .cloned()
+                .or_else(|| item.court_name.clone()),
+            document_count: docs.len(),
+        };
+        let snapshot = {
+            let mut state = lock_unpoisoned(&self.inner);
+            state.pending_receipt = Some(PendingReceipt {
+                prompt: prompt.clone(),
+                response,
+            });
+            if let Some(current) = state.items.iter_mut().find(|current| current.id == item.id) {
+                current.stage_label = "等待签收选择".into();
+                current.status_message = "已找到文书，等待选择是否向法院提交送达回执。".into();
+            }
+            build_snapshot(&state)
+        };
+        sink.on_queue_updated(snapshot);
+        let selection = tokio::select! {
+            biased;
+            ctrl = wait_non_running(rx) => Err(ctrl),
+            choice = answer => Ok(choice.unwrap_or(false)),
+        };
+        let mut state = lock_unpoisoned(&self.inner);
+        if state
+            .pending_receipt
+            .as_ref()
+            .is_some_and(|pending| pending.prompt.id == prompt.id)
+        {
+            state.pending_receipt = None;
+            let snapshot = build_snapshot(&state);
+            drop(state);
+            sink.on_queue_updated(snapshot);
+        }
+        selection
+    }
+
+    async fn prepare_zxfw_documents<S: ProgressSink>(
+        &self,
+        item: &QueueItem,
+        client: &ZxfwClient,
+        docs: Vec<ZxfwDocEntry>,
+        rx: &mut watch::Receiver<TransferControl>,
+        sink: &S,
+    ) -> Result<Vec<ZxfwDocEntry>, TransferControl> {
+        if docs.is_empty() || item.receipt_status != ReceiptStatus::NotRequested {
+            return Ok(docs);
+        }
+        match crate::store::read_receipt_attempt(&self.config_dir, item) {
+            Ok(None) => {}
+            saved => {
+                let status = saved.ok().flatten().unwrap_or(ReceiptStatus::Unknown);
+                self.update_item(&item.id, sink, |current| current.receipt_status = status);
+                return Ok(docs);
+            }
+        }
+        if !self.ask_about_receipt(item, &docs, rx, sink).await? {
+            return Ok(docs);
+        }
+
+        let control = *rx.borrow();
+        if control != TransferControl::Running {
+            return Err(control);
+        }
+        match crate::store::reserve_receipt_attempt(&self.config_dir, item) {
+            Ok(None) => {}
+            reserved => {
+                let status = reserved.ok().flatten().unwrap_or(ReceiptStatus::Unknown);
+                self.update_item(&item.id, sink, |current| current.receipt_status = status);
+                return Ok(docs);
+            }
+        }
+
+        self.update_item_transient(&item.id, sink, |current| {
+            current.stage_label = "提交签收".into();
+            current.status_message = "正在向法院提交送达回执。".into();
+        });
+        let outcome = tokio::select! {
+            biased;
+            ctrl = wait_non_running(rx) => Err(ctrl),
+            status = client.confirm_receipt(&item.params) => Ok(status),
+        };
+        let status = outcome.unwrap_or(ReceiptStatus::Unknown);
+        let status = if crate::store::finish_receipt_attempt(&self.config_dir, item, status).is_ok()
+        {
+            status
+        } else {
+            ReceiptStatus::Unknown
+        };
+        self.update_item(&item.id, sink, |current| current.receipt_status = status);
+        outcome?;
+        if status != ReceiptStatus::Confirmed {
+            return Ok(docs);
+        }
+
+        // A successful signature can add the delivery receipt to the document list.
+        tokio::select! {
+            biased;
+            ctrl = wait_non_running(rx) => Err(ctrl),
+            refreshed = client.fetch_ws_list(&item.params) =>
+                Ok(refreshed.ok().filter(|list| !list.is_empty()).unwrap_or(docs)),
+        }
+    }
+
     async fn process_zxfw_item<S: ProgressSink>(
         &self,
         item: QueueItem,
@@ -598,6 +791,16 @@ impl QueueManager {
             }
         };
 
+        let docs = match self
+            .prepare_zxfw_documents(&item, &client, docs, &mut rx, sink)
+            .await
+        {
+            Ok(docs) => docs,
+            Err(ctrl) => {
+                self.handle_interrupted_item(&item.id, ctrl, &item.documents, &item.failures, sink);
+                return;
+            }
+        };
         self.download_doc_entries(&item, &client, docs, settings, Some(rx), sink)
             .await;
     }
@@ -882,6 +1085,25 @@ impl QueueManager {
                 }
             };
 
+            let docs = match self
+                .prepare_zxfw_documents(&latest_item, &client, docs, &mut rx, &sink)
+                .await
+            {
+                Ok(docs) => docs,
+                Err(ctrl) => {
+                    self.handle_interrupted_item(
+                        &task_id,
+                        ctrl,
+                        &latest_item.documents,
+                        &latest_item.failures,
+                        &sink,
+                    );
+                    if ctrl == TransferControl::Paused {
+                        continue;
+                    }
+                    return;
+                }
+            };
             self.download_doc_entries(&latest_item, &client, docs, &settings, Some(rx.clone()), &sink)
                 .await;
             drop(permit);
@@ -2251,6 +2473,10 @@ fn build_snapshot(state: &QueueState) -> QueueSnapshot {
 
     QueueSnapshot {
         items: state.items.clone(),
+        receipt_prompt: state
+            .pending_receipt
+            .as_ref()
+            .map(|pending| pending.prompt.clone()),
         is_running: state.is_running,
         is_paused: state.is_paused,
         total_count,
@@ -2915,6 +3141,116 @@ mod tests {
         assert_eq!(snap.items[0].stage_label, "已停止");
     }
 
+    async fn wait_for_receipt_prompt(mgr: &QueueManager) -> ReceiptPrompt {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(prompt) = mgr.snapshot().receipt_prompt {
+                    return prompt;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn receipt_confirmation_is_sent_once_and_an_unknown_result_survives_restart() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let server_calls = calls.clone();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut request = [0_u8; 4096];
+                let received = socket.read(&mut request).await.unwrap();
+                let path = String::from_utf8_lossy(&request[..received]);
+                assert!(path.starts_with("POST /updateSdxxBySdzt "));
+                server_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                // The server got the request, but its response does not let us tell whether it committed.
+                socket
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+
+        let tmp = TempDir::new().unwrap();
+        let config = tmp.path().join("config");
+        let settings = AppSettings::default_with_dir(tmp.path().display().to_string());
+        let mgr = QueueManager::new(settings, config.clone());
+        let sink = MemorySink::default();
+        let text = "https://zxfw.court.gov.cn/?qdbh=Q14&sdbh=S14&sdsin=X14";
+        let item = mgr.add_batch(text, &sink).added.remove(0);
+        let client = ZxfwClient::with_base_url(&base).unwrap();
+        let mut rx =
+            QueueManager::acquire_worker_slot_locked(&mut lock_unpoisoned(&mgr.inner), None);
+        let docs = vec![ZxfwDocEntry {
+            c_wsmc: Some("测试文书".into()),
+            wjlj: None,
+            c_fymc: Some("测试法院".into()),
+            c_wsbh: None,
+            c_wjgs: None,
+        }];
+
+        let (cancelled, ()) = tokio::join!(
+            mgr.prepare_zxfw_documents(&item, &client, docs.clone(), &mut rx, &sink),
+            async {
+                wait_for_receipt_prompt(&mgr).await;
+                mgr.pause_queue(&sink);
+            }
+        );
+        assert_eq!(cancelled.unwrap_err(), TransferControl::Paused);
+        assert!(mgr.snapshot().receipt_prompt.is_none());
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        mgr.resume_queue(&sink);
+
+        let (download, ()) = tokio::join!(
+            mgr.prepare_zxfw_documents(&item, &client, docs.clone(), &mut rx, &sink),
+            async {
+                let prompt = wait_for_receipt_prompt(&mgr).await;
+                assert_eq!(prompt.document_count, 1);
+                assert_eq!(prompt.court_name.as_deref(), Some("测试法院"));
+                assert!(mgr
+                    .respond_to_receipt("stale-prompt", true, false, &sink)
+                    .is_err());
+                assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+                let updated = mgr
+                    .respond_to_receipt(&prompt.id, true, true, &sink)
+                    .unwrap();
+                assert_eq!(updated.receipt_preference, ReceiptPreference::Submit);
+            }
+        );
+        assert_eq!(download.unwrap().len(), 1);
+        assert_eq!(
+            mgr.snapshot().items[0].receipt_status,
+            ReceiptStatus::Unknown
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(mgr.snapshot().receipt_prompt.is_none());
+
+        let settings = crate::store::load_settings(&config, tmp.path().display().to_string());
+        let reopened = QueueManager::new(settings, config);
+        let old_link = format!("{text}&mm=changed");
+        let reimported = reopened.add_batch(&old_link, &sink).added.remove(0);
+        assert_eq!(reimported.receipt_status, ReceiptStatus::Unknown);
+        let mut rx =
+            QueueManager::acquire_worker_slot_locked(&mut lock_unpoisoned(&reopened.inner), None);
+        assert_eq!(
+            reopened
+                .prepare_zxfw_documents(&reimported, &client, docs, &mut rx, &sink)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
     #[tokio::test]
     async fn verify_and_download_succeeds_without_consuming_attempt_and_runs_in_background() {
         use tokio::io::AsyncWriteExt;
@@ -2990,10 +3326,21 @@ mod tests {
             "sjhm".to_string(),
             "1234".to_string(),
             Some(&base_url),
-            sink,
+            sink.clone(),
         )
         .await
         .unwrap();
+
+        let prompt = wait_for_receipt_prompt(&mgr).await;
+        assert_eq!(prompt.document_count, 1);
+        assert_eq!(
+            receipt_requests.load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        let updated = mgr
+            .respond_to_receipt(&prompt.id, false, true, &sink)
+            .unwrap();
+        assert_eq!(updated.receipt_preference, ReceiptPreference::DownloadOnly);
 
         tokio::time::timeout(Duration::from_secs(3), async {
             loop {

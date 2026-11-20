@@ -31,6 +31,7 @@ import { FallbackControlBar } from "./components/FallbackControlBar";
 import { LegacyRecoveryDialog } from "./components/LegacyRecoveryDialog";
 import { ProfilesDialog } from "./components/ProfilesDialog";
 import { QueueItemCard } from "./components/QueueItemCard";
+import { ReceiptDecisionDialog } from "./components/ReceiptDecisionDialog";
 import { VerifyIdentityDialog } from "./components/VerifyIdentityDialog";
 import { MatrixDownloadOverlay } from "./MatrixDownloadOverlay";
 import { previewSettings } from "./preview";
@@ -82,6 +83,7 @@ export default function App() {
   const [confirmClearData, setConfirmClearData] = useState(false);
   const [signingTaskId, setSigningTaskId] = useState<string | null>(null);
   const signingTask = snapshot.items.find((item) => item.id === signingTaskId);
+  const receiptPrompt = snapshot.receiptPrompt;
   const [verifyId, setVerifyId] = useState<string | null>(null);
   const verifyTarget = snapshot.items.find((item) => item.id === verifyId);
   const [verifyMethod, setVerifyMethod] = useState<"sjhm" | "zjhm">("sjhm");
@@ -946,7 +948,7 @@ export default function App() {
               <Mail size={13} /> 法院电子送达
             </span>
             <h1 id="desk-title">送达工作台</h1>
-            <p>从法院短信提取送达链接，批量下载并按案归档。签收由你在法院页面处理。</p>
+            <p>从法院短信提取送达链接，批量下载并按案归档。支持下载前确认是否提交送达回执。</p>
           </div>
           <Airmail />
         </section>
@@ -1175,7 +1177,11 @@ export default function App() {
                   <div>
                     <dt>法院签收回执</dt>
                     <dd>
-                      在法院页面操作
+                      {{
+                        ask: "下载前询问",
+                        download_only: "仅下载",
+                        submit: "自动提交回执",
+                      }[settings.receiptPreference]}
                     </dd>
                   </div>
                 </dl>
@@ -1428,8 +1434,8 @@ export default function App() {
           <div className="modal-header"><h2>隐私与数据</h2></div>
           <div className="modal-body">
             <p>小达鸭是独立的文书归档工具。短信在本机解析，取件链接、提取码和常用尾号在本次运行期间使用。</p>
-            <p>取件时，必要的链接参数会发送至对应送达平台。仅在你提交核验时向该平台发送尾号。本地归档记录包含案号、文书名称和保存位置。</p>
-            {confirmClearData && <p>清除队列、历史、暂存文件和本次运行的尾号。已归档的文书会保留。</p>}
+            <p>取件时，必要的链接参数会发送至对应送达平台。仅在你提交核验时向该平台发送尾号。本地归档记录包含案号、文书名称和保存位置。提交签收时会保留回执结果，防止重试时再次提交。</p>
+            {confirmClearData && <p>清除队列、历史、暂存文件和本次运行的尾号，并恢复下载前询问签收。已归档的文书会保留。</p>}
           </div>
           <div className="modal-footer">
             <button className="btn" disabled={busy} onClick={() => setShowPrivacy(false)}>关闭</button>
@@ -1507,7 +1513,7 @@ export default function App() {
       {snapshot.isRunning &&
         settings?.matrixEnabled &&
         !matrixMinimized &&
-        !verifyTarget && (
+        !verifyTarget && !snapshot.receiptPrompt && (
           <MatrixDownloadOverlay
             snapshot={snapshot}
             activeItem={activeItem}
@@ -1572,6 +1578,21 @@ export default function App() {
             void runAction(() => handleDeleteProfile(id))
           }
           onClose={() => setShowProfiles(false)}
+        />
+      )}
+      {receiptPrompt && (
+        <ReceiptDecisionDialog
+          key={receiptPrompt.id}
+          prompt={receiptPrompt}
+          onDecide={async (submit, remember) => {
+            const updated = await invoke<AppSettings>("respond_to_receipt", {
+              promptId: receiptPrompt.id, submit, remember,
+            });
+            setSettings(updated);
+            if (remember) setArchiveDraft((draft) =>
+              draft ? { ...draft, receiptPreference: updated.receiptPreference } : draft
+            );
+          }}
         />
       )}
     </div>

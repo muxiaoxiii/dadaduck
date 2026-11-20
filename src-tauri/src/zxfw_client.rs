@@ -1,4 +1,4 @@
-use crate::models::{DeliveryParams, TransferControl};
+use crate::models::{DeliveryParams, ReceiptStatus, TransferControl};
 use crate::validator::{validate_file, ValidationError};
 use futures_util::StreamExt;
 use regex::Regex;
@@ -149,8 +149,13 @@ impl ZxfwClient {
         let client = Client::builder()
             .cookie_store(true)
             .https_only(base_url.starts_with("https://"))
+            .retry(reqwest::retry::never())
             .redirect(reqwest::redirect::Policy::custom(|attempt| {
                 if attempt.previous().len() >= 10
+                    || attempt
+                        .previous()
+                        .first()
+                        .is_some_and(|url| url.path().ends_with("/updateSdxxBySdzt"))
                     || attempt
                         .previous()
                         .first()
@@ -319,6 +324,31 @@ impl ZxfwClient {
         } else {
             msg.to_string()
         }))
+    }
+
+    pub async fn confirm_receipt(&self, params: &DeliveryParams) -> ReceiptStatus {
+        let url = format!("{}/updateSdxxBySdzt", self.base_url);
+        let Ok(response) = self
+            .client
+            .post(url)
+            .timeout(Duration::from_secs(LIST_TIMEOUT_SECS))
+            .json(&params.to_zxfw_payload())
+            .send()
+            .await
+        else {
+            return ReceiptStatus::Unknown;
+        };
+        if !response.status().is_success() {
+            return ReceiptStatus::Unknown;
+        }
+        let Ok(envelope) = response.json::<ApiEnvelope>().await else {
+            return ReceiptStatus::Unknown;
+        };
+        match parse_api_code(envelope.code.as_ref()) {
+            Some(200) => ReceiptStatus::Confirmed,
+            Some(_) => ReceiptStatus::Unconfirmed,
+            None => ReceiptStatus::Unknown,
+        }
     }
 
     pub async fn download_to_staging<F, S>(
@@ -769,6 +799,8 @@ mod tests {
                         saw.store(1, Ordering::SeqCst);
                     }
                     (200, "application/json", br#"{"code":"200"}"#.to_vec())
+                } else if path.ends_with("/updateSdxxBySdzt") {
+                    (200, "application/json", br#"{"code":"200"}"#.to_vec())
                 } else {
                     (404, "text/plain", b"nope".to_vec())
                 }
@@ -787,5 +819,9 @@ mod tests {
         assert_eq!(client.identity_gate(&params).await, Some(true));
         client.verify_identity(&params, "zjhm", "123x").await.unwrap();
         assert_eq!(saw_upper_x.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            client.confirm_receipt(&params).await,
+            ReceiptStatus::Confirmed
+        );
     }
 }

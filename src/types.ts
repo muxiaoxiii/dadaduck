@@ -34,6 +34,15 @@ export type ReceiptStatus =
   | "unconfirmed"
   | "unknown";
 
+export type ReceiptPreference = "ask" | "download_only" | "submit";
+
+export interface ReceiptPrompt {
+  id: string;
+  caseNumber?: string | null;
+  courtName?: string | null;
+  documentCount: number;
+}
+
 export interface LawyerProfile {
   id: string;
   name: string;
@@ -52,6 +61,7 @@ export interface AppSettings {
   renameTemplate: RenameTemplate;
   customTemplate: string;
   prefixIndex: boolean;
+  receiptPreference: ReceiptPreference;
   matrixEnabled: boolean;
   requestDelayMs: number;
   profiles: LawyerProfile[];
@@ -158,6 +168,7 @@ export interface ParseBatchSummary {
 
 export interface QueueSnapshot {
   items: QueueItem[];
+  receiptPrompt?: ReceiptPrompt | null;
   isRunning: boolean;
   isPaused: boolean;
   totalCount: number;

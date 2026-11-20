@@ -82,6 +82,15 @@ pub enum AndroidStorageMode {
     SafTree,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReceiptPreference {
+    #[default]
+    Ask,
+    DownloadOnly,
+    Submit,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
@@ -93,6 +102,8 @@ pub struct AppSettings {
     pub custom_template: String,
     #[serde(default)]
     pub prefix_index: bool,
+    #[serde(default)]
+    pub receipt_preference: ReceiptPreference,
     #[serde(default)]
     pub matrix_enabled: bool,
     pub request_delay_ms: u64,
@@ -115,6 +126,7 @@ impl AppSettings {
             rename_template: RenameTemplate::CaseArchive,
             custom_template: "{case_no}_{title}_{date}".to_string(),
             prefix_index: false,
+            receipt_preference: ReceiptPreference::Ask,
             matrix_enabled: false,
             request_delay_ms: 400,
             profiles: Vec::new(),
@@ -174,7 +186,7 @@ pub enum ItemStatus {
     BrowserRequired,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ReceiptStatus {
     #[default]
@@ -329,8 +341,18 @@ pub struct LegacyExportResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ReceiptPrompt {
+    pub id: String,
+    pub case_number: Option<String>,
+    pub court_name: Option<String>,
+    pub document_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct QueueSnapshot {
     pub items: Vec<QueueItem>,
+    pub receipt_prompt: Option<ReceiptPrompt>,
     pub is_running: bool,
     pub is_paused: bool,
     pub total_count: usize,
