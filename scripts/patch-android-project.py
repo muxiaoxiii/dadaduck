@@ -24,6 +24,8 @@ APP_MAIN_DIR = ANDROID_DIR / "app" / "src" / "main"
 RES_DIR = APP_MAIN_DIR / "res"
 ICONS_ANDROID_DIR = ROOT / "src-tauri" / "icons" / "android"
 MANIFEST_PATH = APP_MAIN_DIR / "AndroidManifest.xml"
+APP_GRADLE_PATH = ANDROID_DIR / "app" / "build.gradle.kts"
+ANDROID_SDK_API = 36
 FILE_PATHS_XML = APP_MAIN_DIR / "res" / "xml" / "dadaduck_file_paths.xml"
 
 FILE_PATHS_CONTENT = """<?xml version="1.0" encoding="utf-8"?>
@@ -848,6 +850,21 @@ def main() -> int:
     if not ANDROID_DIR.exists():
         print(f"Android generated directory not found: {ANDROID_DIR}", file=sys.stderr)
         return 1
+
+    gradle_text = APP_GRADLE_PATH.read_text(encoding="utf-8")
+    patched_gradle = gradle_text
+    for setting in ("compileSdk", "targetSdk"):
+        patched_gradle, count = re.subn(
+            rf"(?m)^([ \t]*{setting}\s*=\s*)\d+\b",
+            lambda match: f"{match[1]}{ANDROID_SDK_API}",
+            patched_gradle,
+        )
+        if count != 1:
+            print(f"Could not find a single {setting} value in {APP_GRADLE_PATH}", file=sys.stderr)
+            return 1
+    if patched_gradle != gradle_text:
+        APP_GRADLE_PATH.write_text(patched_gradle, encoding="utf-8")
+        print(f"Pinned Android compile and target SDK to {ANDROID_SDK_API}")
 
     FILE_PATHS_XML.parent.mkdir(parents=True, exist_ok=True)
     FILE_PATHS_XML.write_text(FILE_PATHS_CONTENT, encoding="utf-8")

@@ -84,8 +84,8 @@ jobs:
             sdkmanager "ndk;27.2.12479018"
             NDK_DIR="$ANDROID_ROOT/ndk/27.2.12479018"
           fi
-          if [ ! -d "$ANDROID_ROOT/platforms/android-37" ] || [ ! -d "$ANDROID_ROOT/build-tools/35.0.0" ]; then
-            sdkmanager "platforms;android-37" "build-tools;35.0.0"
+          if [ ! -d "$ANDROID_ROOT/platforms/android-36" ] || [ ! -d "$ANDROID_ROOT/build-tools/36.0.0" ]; then
+            sdkmanager "platforms;android-36" "build-tools;36.0.0"
           fi
           echo "ANDROID_HOME=$ANDROID_ROOT" >> "$GITHUB_ENV"
           echo "NDK_HOME=$NDK_DIR" >> "$GITHUB_ENV"

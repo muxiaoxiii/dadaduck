@@ -34,7 +34,7 @@ npm run tauri -- dev
 npm run tauri -- build
 ```
 
-在配置 Android SDK、NDK 和 JDK 后构建 Android：
+在配置 Android SDK 36、NDK 和 JDK 后构建 Android：
 
 ```bash
 npm run tauri -- android init
