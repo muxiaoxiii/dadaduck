@@ -1,0 +1,33 @@
+[package]
+name = "dadaduck"
+version = "0.3.1"
+description = "小达鸭 DadaDuck — 跨平台法院送达文书顺序批量下载器"
+authors = ["muxiaoxiii"]
+homepage = "https://github.com/muxiaoxiii"
+repository = "https://github.com/muxiaoxiii/dadaduck-public"
+license = "PolyForm-Noncommercial-1.0.0"
+edition = "2021"
+
+[lib]
+name = "dadaduck_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "net"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "cookies", "stream", "rustls-tls"] }
+futures-util = "0.3"
+regex = "1"
+url = "2"
+sha2 = "0.10"
+chrono = { version = "0.4", features = ["clock"] }
+thiserror = "2"
+uuid = { version = "1", features = ["v4"] }
+tempfile = "3"

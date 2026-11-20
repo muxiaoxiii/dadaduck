@@ -1,0 +1,145 @@
+name: Verify DadaDuck
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_windows:
+        description: "是否打包 Windows (x64 & 32-bit)"
+        required: false
+        default: false
+        type: boolean
+      build_android:
+        description: "是否打包 Android APK (arm64)"
+        required: false
+        default: true
+        type: boolean
+      include_macos:
+        description: "是否同时打包 macOS"
+        required: false
+        default: false
+        type: boolean
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  build-windows:
+    name: Windows (${{ matrix.arch_label }})
+    if: github.event_name != 'workflow_dispatch' || inputs.build_windows == true
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch_label: x64
+            rust_target: x86_64-pc-windows-msvc
+          - arch_label: x86-32bit
+            rust_target: i686-pc-windows-msvc
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+          key: windows-${{ matrix.arch_label }}
+      - run: npm ci
+      - name: Verify Frontend & Rust Tests (Windows ${{ matrix.arch_label }})
+        run: |
+          npm run build
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --target ${{ matrix.rust_target }}
+      - name: Build Tauri Windows (${{ matrix.arch_label }})
+        run: npx tauri build --target ${{ matrix.rust_target }} --bundles nsis
+
+  build-android:
+    name: Android APK (arm64)
+    if: github.event_name != 'workflow_dispatch' || inputs.build_android == true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Configure Preinstalled Android SDK & NDK
+        run: |
+          ANDROID_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          CMDLINE_BIN="$(ls -d "$ANDROID_ROOT"/cmdline-tools/*/bin | head -n 1)"
+          export PATH="$CMDLINE_BIN:$ANDROID_ROOT/platform-tools:$PATH"
+          yes | sdkmanager --licenses >/dev/null || true
+          NDK_DIR="$(ls -d "$ANDROID_ROOT"/ndk/* 2>/dev/null | sort -V | tail -n 1 || true)"
+          if [ -z "$NDK_DIR" ]; then
+            sdkmanager "ndk;27.2.12479018"
+            NDK_DIR="$ANDROID_ROOT/ndk/27.2.12479018"
+          fi
+          if [ ! -d "$ANDROID_ROOT/platforms/android-37" ] || [ ! -d "$ANDROID_ROOT/build-tools/35.0.0" ]; then
+            sdkmanager "platforms;android-37" "build-tools;35.0.0"
+          fi
+          echo "ANDROID_HOME=$ANDROID_ROOT" >> "$GITHUB_ENV"
+          echo "NDK_HOME=$NDK_DIR" >> "$GITHUB_ENV"
+          echo "$CMDLINE_BIN" >> "$GITHUB_PATH"
+          echo "$ANDROID_ROOT/platform-tools" >> "$GITHUB_PATH"
+          echo "Using ANDROID_HOME=$ANDROID_ROOT NDK_HOME=$NDK_DIR"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+          key: android-arm64
+      - run: npm ci
+      - name: Verify Frontend & Android Patch Script
+        run: |
+          npx tsc --noEmit
+          python3 -m py_compile scripts/patch-android-project.py
+      - name: Initialize Tauri Android Project
+        run: npx tauri android init --ci
+      - name: Patch Android MainActivity & FileProvider
+        run: python3 scripts/patch-android-project.py
+      - name: Build Android APK (aarch64)
+        run: npx tauri android build --apk --target aarch64 --ci
+
+  build-macos:
+    name: macOS (${{ matrix.arch_label }})
+    if: github.event_name != 'workflow_dispatch' || inputs.include_macos == true
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch_label: arm64
+            rust_target: aarch64-apple-darwin
+          - arch_label: intel-x64
+            rust_target: x86_64-apple-darwin
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+          key: macos-${{ matrix.arch_label }}
+      - run: npm ci
+      - name: Verify Frontend & Rust Tests (macOS ${{ matrix.arch_label }})
+        run: |
+          npm run build
+          cargo test --locked --manifest-path src-tauri/Cargo.toml
+      - name: Build Tauri macOS (${{ matrix.arch_label }})
+        run: npx tauri build --bundles app --target ${{ matrix.rust_target }}
