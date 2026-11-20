@@ -4,7 +4,7 @@ version = "0.3.2"
 description = "小达鸭 DadaDuck — 跨平台法院送达文书顺序批量下载器"
 authors = ["muxiaoxiii"]
 homepage = "https://github.com/muxiaoxiii"
-repository = "https://github.com/muxiaoxiii/dadaduck-public"
+repository = "https://github.com/muxiaoxiii/dadaduck"
 license = "PolyForm-Noncommercial-1.0.0"
 edition = "2021"
 

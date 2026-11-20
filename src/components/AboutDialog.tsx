@@ -5,7 +5,7 @@ import { X } from "lucide-react";
 import { version } from "../../package.json";
 import { Dialog } from "../Dialog";
 
-const projectUrl = "https://github.com/muxiaoxiii/dadaduck-public";
+const projectUrl = "https://github.com/muxiaoxiii/dadaduck";
 const xiaohongshuUrl = "https://xhslink.com/m/A3Ibe0w27UC";
 
 export function AboutDialog({ onClose }: { onClose: () => void }) {

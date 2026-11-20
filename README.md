@@ -38,7 +38,7 @@
 
 ## 构建
 
-源码和各平台安装包见 [GitHub Releases](https://github.com/muxiaoxiii/dadaduck-public/releases)。自行构建需要 Node.js 22、Rust 和对应平台的 [Tauri 构建依赖](https://v2.tauri.app/start/prerequisites/)。
+源码和各平台安装包见 [GitHub Releases](https://github.com/muxiaoxiii/dadaduck/releases)。自行构建需要 Node.js 22、Rust 和对应平台的 [Tauri 构建依赖](https://v2.tauri.app/start/prerequisites/)。
 
 ```bash
 npm ci
