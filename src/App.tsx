@@ -18,13 +18,14 @@ import {
   Play,
   Plus,
   RotateCcw,
-  SlidersHorizontal,
+  Settings,
   Square,
   Upload,
   UserCheck,
 } from "lucide-react";
 import { Airmail, DuckMark } from "./art/Postmark";
 import { Dialog } from "./Dialog";
+import { AboutDialog } from "./components/AboutDialog";
 import { DemoDialog } from "./components/DemoDialog";
 import { ArchiveSettingsDialog } from "./components/ArchiveSettingsDialog";
 import { FallbackControlBar } from "./components/FallbackControlBar";
@@ -79,6 +80,7 @@ export default function App() {
   });
   const [banner, setBanner] = useState<string | null>(null);
   const [showDemo, setShowDemo] = useState(false);
+  const [showAbout, setShowAbout] = useState(false);
   const [showPrivacy, setShowPrivacy] = useState(false);
   const [confirmClearData, setConfirmClearData] = useState(false);
   const [signingTaskId, setSigningTaskId] = useState<string | null>(null);
@@ -175,9 +177,17 @@ export default function App() {
     };
     document.addEventListener("visibilitychange", onVisibility);
 
+    let unlistenAboutFn: (() => void) | undefined;
     let unlistenQueueFn: (() => void) | undefined;
     let unlistenProgressFn: (() => void) | undefined;
     let unlistenFallbackFn: (() => void) | undefined;
+
+    listen("open-about", () => {
+      if (!disposed) setShowAbout(true);
+    }).then((unlisten) => {
+      if (disposed) unlisten();
+      else unlistenAboutFn = unlisten;
+    });
 
     listen<QueueSnapshot>("queue-updated", (event) => {
       if (!disposed) setSnapshot(event.payload);
@@ -232,6 +242,7 @@ export default function App() {
     return () => {
       disposed = true;
       document.removeEventListener("visibilitychange", onVisibility);
+      unlistenAboutFn?.();
       unlistenQueueFn?.();
       unlistenProgressFn?.();
       unlistenFallbackFn?.();
@@ -909,25 +920,26 @@ export default function App() {
         <div className="header-actions">
           {(isMobile || legacyDocs.length > 0) && (
             <button
-              className="quiet"
+              className="quiet header-utility"
+              aria-label="已有文书"
               onClick={() => void openLegacyRecoveryModal()}
               disabled={!settings}
               title="找回并导出旧版本保存在应用私密目录的文书"
             >
               <FolderInput size={16} />
-              已有文书{legacyDocs.length > 0 ? ` (${legacyDocs.length})` : ""}
+              <span>已有文书{legacyDocs.length > 0 ? ` (${legacyDocs.length})` : ""}</span>
             </button>
           )}
           <button
-            className="quiet"
+            className="quiet header-utility"
+            aria-label="本次尾号"
             onClick={() => setShowProfiles(true)}
             disabled={!settings}
           >
             <UserCheck size={16} />
-            本次尾号
-            {settings && settings.profiles.length > 0
+            <span>本次尾号{settings && settings.profiles.length > 0
               ? ` (${settings.profiles.length})`
-              : ""}
+              : ""}</span>
           </button>
           {!isMobile && (
             <button
@@ -939,6 +951,10 @@ export default function App() {
               保存目录
             </button>
           )}
+          <button type="button" className="btn header-settings" disabled={!settings} onClick={editArchive}>
+            <Settings size={17} />
+            设置
+          </button>
         </div>
       </header>
       <main>
@@ -1113,15 +1129,6 @@ export default function App() {
                 <Archive />
                 归档设置
               </h2>
-              <button
-                className="icon-btn"
-                aria-label="编辑归档设置"
-                title="编辑归档设置"
-                disabled={!settings}
-                onClick={editArchive}
-              >
-                <SlidersHorizontal size={16} />
-              </button>
             </div>
             {settings ? (
               <>
@@ -1143,15 +1150,6 @@ export default function App() {
                         : settings.outputDir.split(/[/\\]/).filter(Boolean).pop() ||
                           settings.outputDir}
                     </span>
-                  </button>
-                  <button
-                    className="btn btn-sm"
-                    disabled={!settings}
-                    onClick={editArchive}
-                    aria-label="修改保存目录与归档规则"
-                  >
-                    <SlidersHorizontal size={13} />
-                    归档规则
                   </button>
                 </div>
                 <dl className="archive-rules archive-mobile-hide">
@@ -1481,6 +1479,7 @@ export default function App() {
           }
           onPickAndroidDir={() => void runAction(handlePickAndroidDir)}
           onSave={() => void runAction(saveArchive)}
+          onAbout={() => setShowAbout(true)}
           onClose={() => setArchiveDraft(null)}
         />
       )}
@@ -1580,6 +1579,7 @@ export default function App() {
           onClose={() => setShowProfiles(false)}
         />
       )}
+      {showAbout && <AboutDialog onClose={() => setShowAbout(false)} />}
       {receiptPrompt && (
         <ReceiptDecisionDialog
           key={receiptPrompt.id}

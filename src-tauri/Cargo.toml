@@ -1,6 +1,6 @@
 [package]
 name = "dadaduck"
-version = "0.3.1"
+version = "0.3.2"
 description = "小达鸭 DadaDuck — 跨平台法院送达文书顺序批量下载器"
 authors = ["muxiaoxiii"]
 homepage = "https://github.com/muxiaoxiii"

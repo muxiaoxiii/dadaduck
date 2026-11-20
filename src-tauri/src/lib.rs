@@ -655,6 +655,10 @@ pub fn run() {
 
     builder
         .setup(|app| {
+            #[cfg(target_os = "windows")]
+            if let Some(window) = app.get_webview_window("main") {
+                window.show_menu()?;
+            }
             let config_dir = app
                 .path()
                 .app_config_dir()

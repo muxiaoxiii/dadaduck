@@ -20,6 +20,7 @@ interface ArchiveSettingsDialogProps {
   onUseAndroidDownloads: () => void;
   onPickAndroidDir: () => void;
   onSave: () => void;
+  onAbout: () => void;
   onClose: () => void;
 }
 
@@ -35,12 +36,13 @@ export function ArchiveSettingsDialog({
   onUseAndroidDownloads,
   onPickAndroidDir,
   onSave,
+  onAbout,
   onClose,
 }: ArchiveSettingsDialogProps) {
   return (
-    <Dialog title="归档设置" onClose={() => { if (!busy) onClose(); }}>
+    <Dialog title="设置" onClose={() => { if (!busy) onClose(); }}>
       <div className="card-header">
-        <h2 className="modal-title">归档与命名设置</h2>
+        <h2 className="modal-title">设置</h2>
         <button
           aria-label="关闭归档设置"
           disabled={busy}
@@ -225,6 +227,9 @@ export function ArchiveSettingsDialog({
         <button className="btn btn-primary" disabled={busy} onClick={onSave}>
           保存设置
         </button>
+      </div>
+      <div className="settings-about">
+        <button type="button" className="link-btn" disabled={busy} onClick={onAbout}>关于小达鸭</button>
       </div>
     </Dialog>
   );
