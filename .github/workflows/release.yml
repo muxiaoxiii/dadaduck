@@ -6,6 +6,10 @@ permissions:
 on:
   workflow_dispatch:
     inputs:
+      release_tag:
+        description: "从已有版本标签构建安装包并上传到 Actions 产物，例如 v0.3.1"
+        required: false
+        type: string
       build_windows:
         description: "是否打包 Windows (x64 & 32-bit)"
         required: false
@@ -42,6 +46,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag && format('refs/tags/{0}', inputs.release_tag) || github.sha }}
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -59,6 +66,13 @@ jobs:
           cargo test --locked --manifest-path src-tauri/Cargo.toml --target ${{ matrix.rust_target }}
       - name: Build Tauri Windows (${{ matrix.arch_label }})
         run: npx tauri build --target ${{ matrix.rust_target }} --bundles nsis
+      - name: Upload Windows installer
+        if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: dadaduck-windows-${{ matrix.arch_label }}
+          path: src-tauri/target/${{ matrix.rust_target }}/release/bundle/nsis/*-setup.exe
+          if-no-files-found: error
 
   build-android:
     name: Android APK (arm64)
@@ -66,6 +80,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag && format('refs/tags/{0}', inputs.release_tag) || github.sha }}
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -110,6 +127,20 @@ jobs:
         run: python3 scripts/patch-android-project.py
       - name: Build Android APK (aarch64)
         run: npx tauri android build --apk --target aarch64 --ci
+      - name: Verify Android APK alignment
+        if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+        run: |
+          shopt -s nullglob
+          packages=(src-tauri/gen/android/app/build/outputs/apk/universal/release/*-unsigned.apk)
+          test "${#packages[@]}" -eq 1
+          "$ANDROID_HOME/build-tools/36.0.0/zipalign" -c -P 16 4 "${packages[0]}"
+      - name: Upload Android APK for signing
+        if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: dadaduck-android-arm64
+          path: src-tauri/gen/android/app/build/outputs/apk/universal/release/*-unsigned.apk
+          if-no-files-found: error
 
   build-macos:
     name: macOS (${{ matrix.arch_label }})
@@ -126,6 +157,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag && format('refs/tags/{0}', inputs.release_tag) || github.sha }}
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -142,4 +176,17 @@ jobs:
           npm run build
           cargo test --locked --manifest-path src-tauri/Cargo.toml
       - name: Build Tauri macOS (${{ matrix.arch_label }})
+        if: github.event_name != 'workflow_dispatch' || inputs.release_tag == ''
         run: npx tauri build --bundles app --target ${{ matrix.rust_target }}
+      - name: Build macOS DMG (${{ matrix.arch_label }})
+        if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+        env:
+          APPLE_SIGNING_IDENTITY: "-"
+        run: npx tauri build --bundles dmg --target ${{ matrix.rust_target }}
+      - name: Upload macOS DMG
+        if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: dadaduck-macos-${{ matrix.arch_label }}
+          path: src-tauri/target/${{ matrix.rust_target }}/release/bundle/dmg/*.dmg
+          if-no-files-found: error
